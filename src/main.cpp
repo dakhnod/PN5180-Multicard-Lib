@@ -386,15 +386,13 @@ void loop() {
 
     SEL[1] = 0x70;
 
+    uint8_t SAK;
+
     memcpy(SEL + 2, response, 5);
 
     enableRXCRC();
     enableTXCRC();
-    result = transceive(SEL, 7, response, &responseCount);
-
-    printArray(response, responseCount, "SEL");
-
-    uint8_t SAK = response[0];
+    result = transceive(SEL, 7, &SAK, &responseCount);
 
     if((SAK & 0x04) == 0x00) {
       Serial.println("SAK: ATSS");
@@ -403,6 +401,7 @@ void loop() {
       break;
     }
 
+    // printArray(response, 5, "response");
     memcpy(uid + uidLength, response + 1, 3);
     uidLength += 3;
   }
