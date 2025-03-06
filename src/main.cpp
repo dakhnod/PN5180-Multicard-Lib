@@ -127,12 +127,29 @@ void enableTXCRC(){
   setRegisterBits(0x19, 0b001001);
 }
 
+void enableRXParity(){
+  writeRegister(0x12, 0b110000001000);
+}
+
 void enableRXCRC(){
-  setRegisterBits(0x12, 0b110000001000);
+  writeRegister(0x12, 0b110000001001);
+}
+
+void printArray(uint8_t *data, int length, std::string label) {
+  Serial.printf("%s: ", label.c_str());
+  for(int i = 0; i < length; i++) {
+    Serial.printf("%x ", data[i]);
+  }
+  Serial.println();
 }
 
 void sendData(uint8_t *data, int length) {
-  uint8_t payload[length + 2] = {0x09, 0x07};
+  uint8_t payload[length + 2] = {0x09, 0x00};
+
+  if(length == 1) {
+    payload[1] = 0x07;
+  }
+
   // uint8_t payload[length + 1] = {0x08};
 
   memcpy(payload + 2, data, length);
@@ -279,7 +296,7 @@ int waitForIRQ(int expected){
 
 
 
-int transceive(uint8_t *data, int txLength, uint8_t *response) {
+int transceive(uint8_t *data, int txLength, uint8_t *response, int *responseLength) {
   stopTransceive();
   startTransceive();
 
@@ -300,9 +317,9 @@ int transceive(uint8_t *data, int txLength, uint8_t *response) {
 
   readRegister(0x13, &rx_state);
 
-  int responseCount = rx_state & 0xFF;
+  *responseLength = rx_state & 0xFF;
 
-  readData(response, responseCount);
+  readData(response, *responseLength);
 
   return 0;
 }
@@ -321,43 +338,76 @@ void loop() {
   Serial.println("Sending command...");
 
   uint8_t ATQ = 0x26;
-  uint8_t response[5];
+  uint8_t response[9];
+
+  int responseCount;
 
   RFOn();
 
   disableRXCRC();
   disableTXCRC();
 
-  int result = transceive(&ATQ, 1, response);
+  int result = transceive(&ATQ, 1, response, &responseCount);
 
   Serial.print("ATQA: ");
   if(result == -1) {
     Serial.println("Read timeout");
+    RFOff();
     return;
   }
 
-  for(int i = 0; i < 2; i++) {
-    Serial.printf("%x ", response[i]);
+  printArray(response, responseCount, "ATQA");
+
+  // enableTXCRC();
+
+  uint8_t SEL[7];
+
+  int cascadeLevel = 0;
+  int uidLength;
+  uint8_t uid[10];
+
+  SEL[1] = 0x70;
+  
+  for(int cascadeLevel = 0; cascadeLevel < 3; cascadeLevel++) {
+    SEL[0] = 0x93 + (cascadeLevel * 2);
+    SEL[1] = 0x20;
+
+    enableRXParity();
+    disableTXCRC();
+    result = transceive(SEL, 2, response, &responseCount);
+  
+    if(result == -1) {
+      Serial.println("Read timeout");
+      RFOff();
+      return;
+    }
+
+    printArray(response, responseCount, "SEL");
+
+    SEL[1] = 0x70;
+
+    memcpy(SEL + 2, response, 5);
+
+    enableRXCRC();
+    enableTXCRC();
+    result = transceive(SEL, 7, response, &responseCount);
+
+    printArray(response, responseCount, "SEL");
+
+    uint8_t SAK = response[0];
+
+    if((SAK & 0x04) == 0x00) {
+      Serial.println("SAK: ATSS");
+      memcpy(uid + uidLength, response, 4);
+      uidLength += 4;
+      break;
+    }
+
+    memcpy(uid + uidLength, response + 1, 3);
+    uidLength += 3;
   }
-  Serial.println();
 
-  enableTXCRC();
-  enableRXCRC();
-
-  uint8_t SEL[] = { 0x93, 0x20 };
-
-  result = transceive(SEL, 2, response);
-
-  Serial.print("SEL: ");
-  if(result == -1) {
-    Serial.println("Read timeout");
-    return;
-  }
-
-  for(int i = 0; i < 5; i++) {
-    Serial.printf("%x ", response[i]);
-  }
-  Serial.println();
+  printArray(uid, uidLength, "UID");
 
   RFOff();
 }
