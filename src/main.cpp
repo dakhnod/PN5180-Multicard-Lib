@@ -66,14 +66,11 @@ void setup() {
   uint8_t writeReference[] = {0x06, 0x34, 0}; // gear number
   transmitSPI(writeReference, 3, NULL, 0);
 
-  uint8_t writeThreshold[] = {0x06, 0x37, 10}; // threshold
+  uint8_t writeThreshold[] = {0x06, 0x37, 5}; // threshold
   transmitSPI(writeThreshold, 3, NULL, 0);
 
   uint8_t writeConfig[] = {0x06, 0x38, 0x01}; // gear number
   transmitSPI(writeConfig, 3, NULL, 0);
-
-  loadRFParameters();
-
   
   WiFi.onEvent(onWifiStateChange);
   WiFi.begin("DoubleD", "DoubleD3141");
@@ -359,11 +356,9 @@ int transceive(uint8_t *data, int txLength, uint8_t *response, int *responseLeng
   stopTransceive();
   startTransceive();
 
-  clearIRQ();
-
+  prepareIRQ(0x01);
   sendData(data, txLength);
-
-  int irq = awaitIRQ(0x01, 1000);
+  int irq = awaitIRQ(0x01, 10);
   clearIRQ();
 
   stopTransceive();
@@ -428,6 +423,8 @@ void loop() {
   #endif
 
   Serial.println("Reading card...");
+
+  loadRFParameters();
 
   uint8_t ATQ = 0x26;
   uint8_t response[9];
