@@ -44,6 +44,11 @@ void setup() {
 
   irqEventGroup = xEventGroupCreate();
 
+  Serial.onReceive([](){
+    int higherPriorityTaskWokenUp;
+    xEventGroupSetBitsFromISR(irqEventGroup, 0b100, &higherPriorityTaskWokenUp);
+  }, false);
+
   memset(stuffing, 0xff, sizeof(stuffing));
 
   pinMode(PIN_RST,  OUTPUT);
@@ -56,6 +61,16 @@ void setup() {
   SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI);
 
   digitalWrite(PIN_SS, HIGH);
+
+
+  uint8_t writeReference[] = {0x06, 0x34, 0}; // gear number
+  transmitSPI(writeReference, 3, NULL, 0);
+
+  uint8_t writeThreshold[] = {0x06, 0x37, 10}; // threshold
+  transmitSPI(writeThreshold, 3, NULL, 0);
+
+  uint8_t writeConfig[] = {0x06, 0x38, 0x01}; // gear number
+  transmitSPI(writeConfig, 3, NULL, 0);
 
   loadRFParameters();
 
@@ -97,7 +112,9 @@ void setup() {
 
   server.begin();
 
-  attachInterrupt(PIN_IRQ, onIRQPin, FALLING);
+  attachInterrupt(PIN_IRQ, onIRQPin, RISING);
+
+  delay(1000);
 }
 
 void onIRQPin(){
@@ -154,8 +171,11 @@ void enableRXCRC(){
   writeRegister(0x12, 0b110000001001);
 }
 
-void enableLPCD(){
-  uint8_t command[] = {0x0B, 0x01, 0x64, 0x00};
+void enableLPCD(uint16_t interval){
+  uint8_t command[4] = {0x0B, 0x01};
+  memcpy(command + 2, &interval, 2);
+
+  transmitSPI(command, 4, NULL, 0);
 }
 
 void printArray(uint8_t *data, int length, std::string label) {
@@ -302,16 +322,26 @@ void transmitSPI(uint8_t *data, int length, uint8_t *response, int response_leng
   digitalWrite(PIN_SS, HIGH);
 }
 
-int awaitIRQ(int expected, unsigned int timeout){
+void prepareIRQ(uint32_t expected) {
+  clearIRQ();
 
+  writeRegister(0x01, expected);
+
+  xEventGroupClearBits(irqEventGroup, 0x01);
+}
+
+int awaitIRQ(uint32_t expected, unsigned int timeout){
   uint32_t irq_status = 0;
-
-  /*
-  while((irq_status & expected) != expected) {
+  #if 0
+  while((irq_status & expected) == 0) {
+    // Serial.printf("IRQ: %x\n", irq_status);
     readRegister(0x02, &irq_status);
+    delay(1);
   }
   return irq_status;
-  */
+  #endif
+
+  // clearIRQ();
 
   xEventGroupWaitBits(irqEventGroup, 0x01, true, false, timeout);
 
@@ -355,37 +385,49 @@ int transceive(uint8_t *data, int txLength, uint8_t *response, int *responseLeng
   return 0;
 }
 
+void awaitSerialKeypress() {
+  while(Serial.read() != -1);
+  xEventGroupClearBits(irqEventGroup, 0b100);
+  xEventGroupWaitBits(irqEventGroup, 0b100, true, false, portMAX_DELAY);
+}
+
 void loop() {
   if(wifiConnected) {
     mdns.run();
   }
 
-  if(!Serial.available()) {
-    return;
+  #if 0
+  awaitSerialKeypress();
+  #endif
+
+  uint32_t agcConfig;
+  readRegister(0x26, &agcConfig);
+
+  writeRegister(0x26, agcConfig);
+
+  #if 0
+  while(true){
+    uint32_t agcConfig;
+    readRegister(0x26, &agcConfig);
+
+    Serial.printf("AGC gear: %d, AGC value: %d\n", (agcConfig >> 10) & 0b1111, agcConfig & 0b1111111111);
+
+    delay(100);
   }
-  while(Serial.read() != -1);
-
-  uint32_t agcRefConfig;
-
-  readRegister(0x26, &agcRefConfig);
-
-  delay(10);
-
+  #endif
   
-  uint8_t LPCDConfig[8];
-  uint8_t readCommand[] = {0x07, 0x34, sizeof(LPCDConfig)};
-  transmitSPI(readCommand, 3, LPCDConfig, sizeof(LPCDConfig));
-  printArray(LPCDConfig, sizeof(LPCDConfig), "LPCD");
-  
-  /*
-  Serial.printf("waiting for LPCD %x...\n", agcRefConfig);
-  enableLPCD();
-  awaitIRQ(1 << 19);
-  Serial.println("detected card");
-  return;
-  */
+  #if 1
+  prepareIRQ(1 << 19);
 
-  Serial.println("Sending command...");
+  Serial.printf("waiting for LPCD...\n");
+
+  enableLPCD(100);
+
+  int irq = awaitIRQ(1 << 19, 9999999);
+  Serial.printf("detected card IRQ %x\n", irq);
+  #endif
+
+  Serial.println("Reading card...");
 
   uint8_t ATQ = 0x26;
   uint8_t response[9];
@@ -452,4 +494,6 @@ void loop() {
   printArray(uid, uidLength, "UID");
 
   RFOff();
+
+  delay(4000);
 }
