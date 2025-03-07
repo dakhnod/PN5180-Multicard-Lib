@@ -102,12 +102,12 @@ void setup() {
 
 void onIRQPin(){
   BaseType_t higherPriorityTaskWasWoken = false;
-  xEventGroupSetBitsFromISR(irqEventGroup, 0x01, &higherPriorityTaskWasWoken);
+  xEventGroupSetBitsFromISR(irqEventGroup, 0b01, &higherPriorityTaskWasWoken);
 }
 
 void onBusyPin(){
   BaseType_t higherPriorityTaskWasWoken = false;
-  xEventGroupSetBitsFromISR(irqEventGroup, 0x02, &higherPriorityTaskWasWoken);
+  xEventGroupSetBitsFromISR(irqEventGroup, 0b10, &higherPriorityTaskWasWoken);
 }
 
 void onWifiStateChange(arduino_event_id_t event) {
@@ -190,7 +190,7 @@ void awaitBusyState(int state) {
   xEventGroupClearBits(irqEventGroup, 0x02);
   attachInterrupt(PIN_BUSY, onBusyPin, state ? RISING : FALLING);
   if(digitalRead(PIN_BUSY) != state) {
-    xEventGroupWaitBits(irqEventGroup, 0x02, true, false, 99999);
+    xEventGroupWaitBits(irqEventGroup, 0x02, true, false, 1000);
   }
   xEventGroupClearBits(irqEventGroup, 0x02);
   detachInterrupt(PIN_BUSY);
@@ -302,18 +302,23 @@ void transmitSPI(uint8_t *data, int length, uint8_t *response, int response_leng
   digitalWrite(PIN_SS, HIGH);
 }
 
-int waitForIRQ(int expected){
+int awaitIRQ(int expected, unsigned int timeout){
 
-  uint32_t irq_status;
+  uint32_t irq_status = 0;
 
-  for(int i = 0; i < 9; i++) {
-    xEventGroupWaitBits(irqEventGroup, 0x01, true, false, 100000);
-
+  /*
+  while((irq_status & expected) != expected) {
     readRegister(0x02, &irq_status);
+  }
+  return irq_status;
+  */
 
-    if(irq_status & expected) {
-      return irq_status;
-    }
+  xEventGroupWaitBits(irqEventGroup, 0x01, true, false, timeout);
+
+  readRegister(0x02, &irq_status);
+
+  if(irq_status & expected) {
+    return irq_status;
   }
   return -1;
 }
@@ -328,7 +333,7 @@ int transceive(uint8_t *data, int txLength, uint8_t *response, int *responseLeng
 
   sendData(data, txLength);
 
-  int irq = waitForIRQ(0x01);
+  int irq = awaitIRQ(0x01, 1000);
   clearIRQ();
 
   stopTransceive();
@@ -345,6 +350,8 @@ int transceive(uint8_t *data, int txLength, uint8_t *response, int *responseLeng
 
   readData(response, *responseLength);
 
+  uint8_t eepromWriteCommand[] = {0x06, 0x34};
+
   return 0;
 }
 
@@ -356,6 +363,7 @@ void loop() {
   if(!Serial.available()) {
     return;
   }
+  while(Serial.read() != -1);
 
   uint32_t agcRefConfig;
 
@@ -363,20 +371,19 @@ void loop() {
 
   delay(10);
 
-  /*/
+  
   uint8_t LPCDConfig[8];
   uint8_t readCommand[] = {0x07, 0x34, sizeof(LPCDConfig)};
   transmitSPI(readCommand, 3, LPCDConfig, sizeof(LPCDConfig));
   printArray(LPCDConfig, sizeof(LPCDConfig), "LPCD");
-  return;
-  */
-  Serial.printf("waiting for LPCD %x...", agcRefConfig);
+  
+  /*
+  Serial.printf("waiting for LPCD %x...\n", agcRefConfig);
   enableLPCD();
-  waitForIRQ(1 << 19);
+  awaitIRQ(1 << 19);
   Serial.println("detected card");
   return;
-
-  while(Serial.read() != -1);
+  */
 
   Serial.println("Sending command...");
 
