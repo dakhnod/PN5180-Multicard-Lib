@@ -105,6 +105,11 @@ void onIRQPin(){
   xEventGroupSetBitsFromISR(irqEventGroup, 0x01, &higherPriorityTaskWasWoken);
 }
 
+void onBusyPin(){
+  BaseType_t higherPriorityTaskWasWoken = false;
+  xEventGroupSetBitsFromISR(irqEventGroup, 0x02, &higherPriorityTaskWasWoken);
+}
+
 void onWifiStateChange(arduino_event_id_t event) {
   if(event != ARDUINO_EVENT_WIFI_STA_GOT_IP) {
     return;
@@ -149,6 +154,10 @@ void enableRXCRC(){
   writeRegister(0x12, 0b110000001001);
 }
 
+void enableLPCD(){
+  uint8_t command[] = {0x0B, 0x01, 0x64, 0x00};
+}
+
 void printArray(uint8_t *data, int length, std::string label) {
   Serial.printf("%s: ", label.c_str());
   for(int i = 0; i < length; i++) {
@@ -178,10 +187,13 @@ void readData(uint8_t *response, int length) {
 }
 
 void awaitBusyState(int state) {
-  while (state != digitalRead(PIN_BUSY)){
-    // Serial.printf("Waiting BUSY to becomde %d\n", state);
-    // delay(100);
-  };
+  xEventGroupClearBits(irqEventGroup, 0x02);
+  attachInterrupt(PIN_BUSY, onBusyPin, state ? RISING : FALLING);
+  if(digitalRead(PIN_BUSY) != state) {
+    xEventGroupWaitBits(irqEventGroup, 0x02, true, false, 99999);
+  }
+  xEventGroupClearBits(irqEventGroup, 0x02);
+  detachInterrupt(PIN_BUSY);
 }
 
 void clearIRQ(){
@@ -344,6 +356,25 @@ void loop() {
   if(!Serial.available()) {
     return;
   }
+
+  uint32_t agcRefConfig;
+
+  readRegister(0x26, &agcRefConfig);
+
+  delay(10);
+
+  /*/
+  uint8_t LPCDConfig[8];
+  uint8_t readCommand[] = {0x07, 0x34, sizeof(LPCDConfig)};
+  transmitSPI(readCommand, 3, LPCDConfig, sizeof(LPCDConfig));
+  printArray(LPCDConfig, sizeof(LPCDConfig), "LPCD");
+  return;
+  */
+  Serial.printf("waiting for LPCD %x...", agcRefConfig);
+  enableLPCD();
+  waitForIRQ(1 << 19);
+  Serial.println("detected card");
+  return;
 
   while(Serial.read() != -1);
 
