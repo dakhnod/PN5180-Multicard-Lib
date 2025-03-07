@@ -10,6 +10,7 @@
 #define PIN_MISO 22
 #define PIN_SCK  21
 #define PIN_BUSY 17
+#define PIN_IRQ  16
 
 uint8_t stuffing[64];
 static AsyncWebServer server(80);
@@ -18,6 +19,8 @@ WiFiUDP udp;
 MDNS mdns(udp);
 
 bool wifiConnected = false;
+
+EventGroupHandle_t irqEventGroup;
 
 void hardReset();
 void transmitSPI(uint8_t *data, int length, uint8_t *response, int response_length);
@@ -34,15 +37,19 @@ void startTransceive();
 void disableRXCRC();
 void disableTXCRC();
 void onWifiStateChange(arduino_event_id_t event);
+void onIRQPin();
 
 void setup() {
   Serial.begin(115200);
+
+  irqEventGroup = xEventGroupCreate();
 
   memset(stuffing, 0xff, sizeof(stuffing));
 
   pinMode(PIN_RST,  OUTPUT);
   pinMode(PIN_SS,   OUTPUT);
   pinMode(PIN_BUSY, INPUT);
+  pinMode(PIN_IRQ,  INPUT);
 
   hardReset();
 
@@ -89,6 +96,13 @@ void setup() {
   });
 
   server.begin();
+
+  attachInterrupt(PIN_IRQ, onIRQPin, FALLING);
+}
+
+void onIRQPin(){
+  BaseType_t higherPriorityTaskWasWoken = false;
+  xEventGroupSetBitsFromISR(irqEventGroup, 0x01, &higherPriorityTaskWasWoken);
 }
 
 void onWifiStateChange(arduino_event_id_t event) {
@@ -277,21 +291,19 @@ void transmitSPI(uint8_t *data, int length, uint8_t *response, int response_leng
 }
 
 int waitForIRQ(int expected){
+
   uint32_t irq_status;
 
-  for(int i = 0; true; i++) {
+  for(int i = 0; i < 9; i++) {
+    xEventGroupWaitBits(irqEventGroup, 0x01, true, false, 100000);
+
     readRegister(0x02, &irq_status);
 
     if(irq_status & expected) {
       return irq_status;
-    } 
-
-    if(i > 90) {
-      return -1;
     }
-
-    delay(1);
   }
+  return -1;
 }
 
 
@@ -349,21 +361,18 @@ void loop() {
 
   int result = transceive(&ATQ, 1, response, &responseCount);
 
-  Serial.print("ATQA: ");
   if(result == -1) {
-    Serial.println("Read timeout");
+    Serial.println("ATQA timeout");
     RFOff();
     return;
   }
-
-  printArray(response, responseCount, "ATQA");
 
   // enableTXCRC();
 
   uint8_t SEL[7];
 
   int cascadeLevel = 0;
-  int uidLength;
+  int uidLength = 0;
   uint8_t uid[10];
 
   SEL[1] = 0x70;
@@ -382,8 +391,6 @@ void loop() {
       return;
     }
 
-    printArray(response, responseCount, "SEL");
-
     SEL[1] = 0x70;
 
     uint8_t SAK;
@@ -395,13 +402,11 @@ void loop() {
     result = transceive(SEL, 7, &SAK, &responseCount);
 
     if((SAK & 0x04) == 0x00) {
-      Serial.println("SAK: ATSS");
       memcpy(uid + uidLength, response, 4);
       uidLength += 4;
       break;
     }
 
-    // printArray(response, 5, "response");
     memcpy(uid + uidLength, response + 1, 3);
     uidLength += 3;
   }
