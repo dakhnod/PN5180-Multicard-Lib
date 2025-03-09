@@ -4,6 +4,10 @@
 #include <ESPAsyncWebServer.h>
 #include <MDNS.h>
 
+#define CHECKSUM_RX_PARITY 0b001
+#define CHECKSUM_RX_CRC    0b010
+#define CHECKSUM_TX_CRC    0b100
+
 #define PIN_RST  5
 #define PIN_SS   23
 #define PIN_MOSI 19
@@ -34,8 +38,6 @@ void readData(uint8_t *response, int length);
 void RFOn();
 void RFOff();
 void startTransceive();
-void disableRXCRC();
-void disableTXCRC();
 void onWifiStateChange(arduino_event_id_t event);
 void onIRQPin();
 
@@ -66,10 +68,10 @@ void setup() {
   uint8_t writeReference[] = {0x06, 0x34, 0}; // gear number
   transmitSPI(writeReference, 3, NULL, 0);
 
-  uint8_t writeThreshold[] = {0x06, 0x37, 5}; // threshold
+  uint8_t writeThreshold[] = {0x06, 0x37, 15}; // threshold
   transmitSPI(writeThreshold, 3, NULL, 0);
 
-  uint8_t writeConfig[] = {0x06, 0x38, 0x01}; // gear number
+  uint8_t writeConfig[] = {0x06, 0x38, 0x01}; // LPCD mode
   transmitSPI(writeConfig, 3, NULL, 0);
   
   WiFi.onEvent(onWifiStateChange);
@@ -136,7 +138,7 @@ void onWifiStateChange(arduino_event_id_t event) {
 
 void hardReset(){
   digitalWrite(PIN_RST, LOW);
-  delay(100);
+  delay(1);
   digitalWrite(PIN_RST, HIGH);
 }
 
@@ -148,24 +150,20 @@ void stopTransceive(){
   clearRegisterBits(0x00, 0x07);
 }
 
-void disableTXCRC(){
-  clearRegisterBits(0x19, 0x01);
-}
+void configureChecksum(int flags){
+  if(flags & CHECKSUM_TX_CRC) {
+    setRegisterBits(0x19, 0b001001);
+  }else{
+    clearRegisterBits(0x19, 0b01);
+  }
 
-void disableRXCRC(){
-  clearRegisterBits(0x12, 0x01);
-}
-
-void enableTXCRC(){
-  setRegisterBits(0x19, 0b001001);
-}
-
-void enableRXParity(){
-  writeRegister(0x12, 0b110000001000);
-}
-
-void enableRXCRC(){
-  writeRegister(0x12, 0b110000001001);
+  if(flags & CHECKSUM_RX_PARITY) {
+    writeRegister(0x12, 0b110000001000);
+  }else if(flags & CHECKSUM_RX_CRC) {
+    writeRegister(0x12, 0b110000001001);
+  }else{
+    clearRegisterBits(0x12, 0b1);
+  }
 }
 
 void enableLPCD(uint16_t interval){
@@ -178,7 +176,7 @@ void enableLPCD(uint16_t interval){
 void printArray(uint8_t *data, int length, std::string label) {
   Serial.printf("%s: ", label.c_str());
   for(int i = 0; i < length; i++) {
-    Serial.printf("%x ", data[i]);
+    Serial.printf("%02x ", data[i]);
   }
   Serial.println();
 }
@@ -245,10 +243,10 @@ void setRegisterBits(uint8_t address, uint32_t mask) {
   uint8_t command[] = {
     0x01,
     address, 
-    (mask >> 0 ) & 0xFF,
-    (mask >> 8 ) & 0xFF,
-    (mask >> 16) & 0xFF,
-    (mask >> 24) & 0xFF,
+    (uint8_t)(mask >> 0 ),
+    (uint8_t)(mask >> 8 ),
+    (uint8_t)(mask >> 16),
+    (uint8_t)(mask >> 24),
   };
 
   transmitSPI(command, 6, NULL, 0);
@@ -260,10 +258,10 @@ void clearRegisterBits(uint8_t address, uint32_t mask) {
   uint8_t command[] = {
     0x02,
     address, 
-    (mask >> 0 ) & 0xFF,
-    (mask >> 8 ) & 0xFF,
-    (mask >> 16) & 0xFF,
-    (mask >> 24) & 0xFF,
+    (uint8_t)(mask >> 0 ),
+    (uint8_t)(mask >> 8 ),
+    (uint8_t)(mask >> 16),
+    (uint8_t)(mask >> 24),
   };
 
   transmitSPI(command, 6, NULL, 0);
@@ -273,10 +271,10 @@ void writeRegister(uint8_t address, uint32_t value) {
   uint8_t command[] = {
     0x00,
     address, 
-    (value >> 0 ) & 0xFF,
-    (value >> 8 ) & 0xFF,
-    (value >> 16) & 0xFF,
-    (value >> 24) & 0xFF,
+    (uint8_t)(value >> 0 ),
+    (uint8_t)(value >> 8 ),
+    (uint8_t)(value >> 16),
+    (uint8_t)(value >> 24),
   };
 
   transmitSPI(command, 6, NULL, 0);
@@ -380,10 +378,32 @@ int transceive(uint8_t *data, int txLength, uint8_t *response, int *responseLeng
   return 0;
 }
 
+void readEEPROM(uint8_t startAddress, uint8_t *data, uint8_t length) {
+  uint8_t readCommand[] = {0x07, startAddress, length};
+  transmitSPI(readCommand, 3, data, length);
+}
+
 void awaitSerialKeypress() {
   while(Serial.read() != -1);
   xEventGroupClearBits(irqEventGroup, 0b100);
   xEventGroupWaitBits(irqEventGroup, 0b100, true, false, portMAX_DELAY);
+}
+
+int transceiveATQ(uint16_t *ATQA) {
+  configureChecksum(0);
+
+  uint8_t ATQ = 0x26;
+  int length;
+  int result = transceive(&ATQ, 1, (uint8_t*) ATQA, &length);
+
+  if(result == -1) {
+    return -1;
+  }
+  if(length != 2) {
+    return -1;
+  }
+
+  return 0;
 }
 
 void loop() {
@@ -391,27 +411,43 @@ void loop() {
     mdns.run();
   }
 
-  #if 0
+  #if 01
   awaitSerialKeypress();
   #endif
 
-  uint32_t agcConfig;
-  readRegister(0x26, &agcConfig);
-
-  writeRegister(0x26, agcConfig);
-
   #if 0
+  loadRFParameters();
   while(true){
     uint32_t agcConfig;
     readRegister(0x26, &agcConfig);
 
-    Serial.printf("AGC gear: %d, AGC value: %d\n", (agcConfig >> 10) & 0b1111, agcConfig & 0b1111111111);
+    Serial.printf("DPC gear: %d, AGC value: %d\n", (agcConfig >> 10) & 0b1111, agcConfig & 0b1111111111);
 
     delay(100);
   }
   #endif
-  
-  #if 1
+
+  #if 0
+  loadRFParameters();
+  RFOn();
+  while(true){
+    uint32_t rxInfo;
+    readRegister(0x1D, &rxInfo);
+
+    Serial.printf("AGC gear: %d, AGC value: %d\n", (rxInfo >> 20) & 0b1111, rxInfo & 0b1111111111);
+
+    delay(100);
+  }
+  #endif
+
+  #if 0
+  uint32_t agcConfig;
+  readRegister(0x26, &agcConfig);
+
+  writeRegister(0x26, agcConfig);
+  #endif
+
+  #if 0
   prepareIRQ(1 << 19);
 
   Serial.printf("waiting for LPCD...\n");
@@ -426,20 +462,17 @@ void loop() {
 
   loadRFParameters();
 
-  uint8_t ATQ = 0x26;
+  uint16_t ATQA;
   uint8_t response[9];
 
   int responseCount;
 
   RFOn();
 
-  disableRXCRC();
-  disableTXCRC();
+  int result = transceiveATQ(&ATQA);
 
-  int result = transceive(&ATQ, 1, response, &responseCount);
-
-  if(result == -1) {
-    Serial.println("ATQA timeout");
+  if(result < 0) {
+    Serial.println("ATQA error");
     RFOff();
     return;
   }
@@ -458,8 +491,7 @@ void loop() {
     SEL[0] = 0x93 + (cascadeLevel * 2);
     SEL[1] = 0x20;
 
-    enableRXParity();
-    disableTXCRC();
+    configureChecksum(CHECKSUM_RX_PARITY);
     result = transceive(SEL, 2, response, &responseCount);
   
     if(result == -1) {
@@ -474,8 +506,7 @@ void loop() {
 
     memcpy(SEL + 2, response, 5);
 
-    enableRXCRC();
-    enableTXCRC();
+    configureChecksum(CHECKSUM_TX_CRC | CHECKSUM_RX_CRC);
     result = transceive(SEL, 7, &SAK, &responseCount);
 
     if((SAK & 0x04) == 0x00) {
@@ -491,6 +522,4 @@ void loop() {
   printArray(uid, uidLength, "UID");
 
   RFOff();
-
-  delay(4000);
 }
