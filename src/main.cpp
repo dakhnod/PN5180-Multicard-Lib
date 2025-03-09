@@ -181,12 +181,8 @@ void printArray(uint8_t *data, int length, std::string label) {
   Serial.println();
 }
 
-void sendData(uint8_t *data, int length) {
-  uint8_t payload[length + 2] = {0x09, 0x00};
-
-  if(length == 1) {
-    payload[1] = 0x07;
-  }
+void sendData(uint8_t *data, int length, int lastByteBits) {
+  uint8_t payload[length + 2] = {0x09, lastByteBits % 8};
 
   // uint8_t payload[length + 1] = {0x08};
 
@@ -350,12 +346,12 @@ int awaitIRQ(uint32_t expected, unsigned int timeout){
 
 
 
-int transceive(uint8_t *data, int txLength, uint8_t *response, int *responseLength) {
+int transceive(uint8_t *data, int txLength, int lastByteBits, uint8_t *response, int *responseLength) {
   stopTransceive();
   startTransceive();
 
   prepareIRQ(0x01);
-  sendData(data, txLength);
+  sendData(data, txLength, lastByteBits);
   int irq = awaitIRQ(0x01, 10);
   clearIRQ();
 
@@ -372,8 +368,6 @@ int transceive(uint8_t *data, int txLength, uint8_t *response, int *responseLeng
   *responseLength = rx_state & 0xFF;
 
   readData(response, *responseLength);
-
-  uint8_t eepromWriteCommand[] = {0x06, 0x34};
 
   return 0;
 }
@@ -394,7 +388,7 @@ int transceiveATQ(uint16_t *ATQA) {
 
   uint8_t ATQ = 0x26;
   int length;
-  int result = transceive(&ATQ, 1, (uint8_t*) ATQA, &length);
+  int result = transceive(&ATQ, 1, 7, (uint8_t*) ATQA, &length);
 
   if(result == -1) {
     return -1;
@@ -424,7 +418,7 @@ int selectCard(uint8_t UID[10], int *uidLength){
     SEL[1] = 0x20;
 
     configureChecksum(CHECKSUM_RX_PARITY);
-    int result = transceive(SEL, 2, response, &responseCount);
+    int result = transceive(SEL, 2, 0, response, &responseCount);
   
     if(result == -1) {
       return -1;
@@ -437,7 +431,7 @@ int selectCard(uint8_t UID[10], int *uidLength){
     memcpy(SEL + 2, response, 5);
 
     configureChecksum(CHECKSUM_TX_CRC | CHECKSUM_RX_CRC);
-    result = transceive(SEL, 7, &SAK, &responseCount);
+    result = transceive(SEL, 7, 0, &SAK, &responseCount);
 
     if(result == -1) {
       return -1;
