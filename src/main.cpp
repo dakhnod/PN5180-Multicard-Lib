@@ -406,6 +406,56 @@ int transceiveATQ(uint16_t *ATQA) {
   return 0;
 }
 
+int selectCard(uint8_t UID[10], int *uidLength){
+  uint8_t SEL[7];
+
+  int cascadeLevel = 0;
+
+  SEL[1] = 0x70;
+
+  uint8_t response[7];
+
+  int responseCount;
+
+  *uidLength = 0;
+  
+  for(int cascadeLevel = 0; cascadeLevel < 3; cascadeLevel++) {
+    SEL[0] = 0x93 + (cascadeLevel * 2);
+    SEL[1] = 0x20;
+
+    configureChecksum(CHECKSUM_RX_PARITY);
+    int result = transceive(SEL, 2, response, &responseCount);
+  
+    if(result == -1) {
+      return -1;
+    }
+
+    SEL[1] = 0x70;
+
+    uint8_t SAK;
+
+    memcpy(SEL + 2, response, 5);
+
+    configureChecksum(CHECKSUM_TX_CRC | CHECKSUM_RX_CRC);
+    result = transceive(SEL, 7, &SAK, &responseCount);
+
+    if(result == -1) {
+      return -1;
+    }
+
+    if((SAK & 0x04) == 0x00) {
+      memcpy(UID + (*uidLength), response, 4);
+      *uidLength += 4;
+      break;
+    }
+
+    memcpy(UID + (*uidLength), response + 1, 3);
+    *uidLength += 3;
+  }
+
+  return 0;
+}
+
 void loop() {
   if(wifiConnected) {
     mdns.run();
@@ -463,9 +513,6 @@ void loop() {
   loadRFParameters();
 
   uint16_t ATQA;
-  uint8_t response[9];
-
-  int responseCount;
 
   RFOn();
 
@@ -477,46 +524,15 @@ void loop() {
     return;
   }
 
+  uint8_t uid[10];
+  int uidLength;
+
   // enableTXCRC();
 
-  uint8_t SEL[7];
+  result = selectCard(uid, &uidLength);
 
-  int cascadeLevel = 0;
-  int uidLength = 0;
-  uint8_t uid[10];
-
-  SEL[1] = 0x70;
-  
-  for(int cascadeLevel = 0; cascadeLevel < 3; cascadeLevel++) {
-    SEL[0] = 0x93 + (cascadeLevel * 2);
-    SEL[1] = 0x20;
-
-    configureChecksum(CHECKSUM_RX_PARITY);
-    result = transceive(SEL, 2, response, &responseCount);
-  
-    if(result == -1) {
-      Serial.println("Read timeout");
-      RFOff();
-      return;
-    }
-
-    SEL[1] = 0x70;
-
-    uint8_t SAK;
-
-    memcpy(SEL + 2, response, 5);
-
-    configureChecksum(CHECKSUM_TX_CRC | CHECKSUM_RX_CRC);
-    result = transceive(SEL, 7, &SAK, &responseCount);
-
-    if((SAK & 0x04) == 0x00) {
-      memcpy(uid + uidLength, response, 4);
-      uidLength += 4;
-      break;
-    }
-
-    memcpy(uid + uidLength, response + 1, 3);
-    uidLength += 3;
+  if(result < 0) {
+    Serial.println("select error");
   }
 
   printArray(uid, uidLength, "UID");
