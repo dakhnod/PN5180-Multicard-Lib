@@ -4,6 +4,7 @@
 #include <ESPAsyncWebServer.h>
 #include <MDNS.h>
 
+#define CHECKSUM_NONE      0b000
 #define CHECKSUM_RX_PARITY 0b001
 #define CHECKSUM_RX_CRC    0b010
 #define CHECKSUM_TX_CRC    0b100
@@ -162,7 +163,7 @@ void configureChecksum(int flags){
   }else if(flags & CHECKSUM_RX_CRC) {
     writeRegister(0x12, 0b110000001001);
   }else{
-    clearRegisterBits(0x12, 0b1);
+    clearRegisterBits(0x12, 0b110000001001);
   }
 }
 
@@ -181,8 +182,8 @@ void printArray(uint8_t *data, int length, std::string label) {
   Serial.println();
 }
 
-void sendData(uint8_t *data, int length, int lastByteBits) {
-  uint8_t payload[length + 2] = {0x09, lastByteBits % 8};
+void sendData(uint8_t *data, int length, uint8_t lastByteBits) {
+  uint8_t payload[length + 2] = {0x09, lastByteBits};
 
   // uint8_t payload[length + 1] = {0x08};
 
@@ -346,7 +347,7 @@ int awaitIRQ(uint32_t expected, unsigned int timeout){
 
 
 
-int transceive(uint8_t *data, int txLength, int lastByteBits, uint8_t *response, int *responseLength) {
+int transceive(uint8_t *data, int txLength, int lastByteBits, uint8_t *response, int *responseLength, int *lastReceivedByteBits) {
   stopTransceive();
   startTransceive();
 
@@ -366,6 +367,9 @@ int transceive(uint8_t *data, int txLength, int lastByteBits, uint8_t *response,
   readRegister(0x13, &rx_state);
 
   *responseLength = rx_state & 0xFF;
+  if(lastReceivedByteBits != NULL) {
+    *lastReceivedByteBits = (rx_state >> 13) & 0b111;
+  }
 
   readData(response, *responseLength);
 
@@ -384,11 +388,11 @@ void awaitSerialKeypress() {
 }
 
 int transceiveATQ(uint16_t *ATQA) {
-  configureChecksum(0);
+  configureChecksum(CHECKSUM_RX_PARITY);
 
   uint8_t ATQ = 0x26;
   int length;
-  int result = transceive(&ATQ, 1, 7, (uint8_t*) ATQA, &length);
+  int result = transceive(&ATQ, 1, 7, (uint8_t*) ATQA, &length, NULL);
 
   if(result == -1) {
     return -1;
@@ -398,6 +402,14 @@ int transceiveATQ(uint16_t *ATQA) {
   }
 
   return 0;
+}
+
+void setReceiveBitOffset(int offset) {
+  clearRegisterBits(0x12, 0b111 << 6);
+  if(offset == 0) {
+    return;
+  }
+  setRegisterBits(0x12, (offset & 0b111) << 6);
 }
 
 int selectCard(uint8_t UID[10], int *uidLength){
@@ -418,20 +430,37 @@ int selectCard(uint8_t UID[10], int *uidLength){
     SEL[1] = 0x20;
 
     configureChecksum(CHECKSUM_RX_PARITY);
-    int result = transceive(SEL, 2, 0, response, &responseCount);
+    int result = transceive(SEL, 2, 0, response, &responseCount, NULL);
   
     if(result == -1) {
       return -1;
     }
 
-    SEL[1] = 0x70;
-
-    uint8_t SAK;
-
     memcpy(SEL + 2, response, 5);
 
+    #if 1
+    uint8_t partialResponse[7];
+    int bits = 6;
+    SEL[1] = 0x20 | bits;
+    int lastReceivedByteBits;
+    setReceiveBitOffset(bits);
+    result = transceive(SEL, 3, bits, partialResponse, &responseCount, &lastReceivedByteBits);
+    setReceiveBitOffset(0);
+
+    if(result == -1) {
+      return -1;
+    }
+
+    Serial.printf("response: %d, last bits: %d\n", result, lastReceivedByteBits);
+    printArray(partialResponse, responseCount, "partial response");
+    #endif
+
+    SEL[1] = 0x70;
+    uint8_t SAK;
+
     configureChecksum(CHECKSUM_TX_CRC | CHECKSUM_RX_CRC);
-    result = transceive(SEL, 7, 0, &SAK, &responseCount);
+    result = transceive(SEL, 7, 0, &SAK, &responseCount, NULL);
+    Serial.printf("SAK: %02x\n", SAK);
 
     if(result == -1) {
       return -1;
