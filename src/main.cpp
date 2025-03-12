@@ -395,12 +395,11 @@ void awaitSerialKeypress() {
   xEventGroupWaitBits(irqEventGroup, 0b100, true, false, portMAX_DELAY);
 }
 
-int transceiveATQ(uint16_t *ATQA) {
+int transceiveShort(uint8_t command, uint16_t *ATQA) {
   configureChecksum(CHECKSUM_RX_PARITY);
 
-  uint8_t ATQ = 0x26;
   int length;
-  int result = transceive(&ATQ, 1, 7, (uint8_t*) ATQA, &length, NULL, NULL);
+  int result = transceive(&command, 1, 7, (uint8_t*) ATQA, &length, NULL, NULL);
 
   if(result == -1) {
     return -1;
@@ -412,6 +411,14 @@ int transceiveATQ(uint16_t *ATQA) {
   return 0;
 }
 
+int transceiveATQA(uint16_t *ATQA) {
+  return transceiveShort(0x25, ATQA);
+}
+
+int transceiveWUP(uint16_t *ATQA) {
+  return transceiveShort(0x52, ATQA);
+}
+
 void setReceiveBitOffset(int offset) {
   clearRegisterBits(0x12, 0b111 << 6);
   if(offset == 0) {
@@ -420,7 +427,7 @@ void setReceiveBitOffset(int offset) {
   setRegisterBits(0x12, (offset & 0b111) << 6);
 }
 
-int selectCard(uint8_t UID[10], int *uidLength){
+int selectCard(uint8_t UID[10], int *uidLength, int cardIndex, bool *moreCardsAvailable){
   uint8_t SEL[7];
 
   int cascadeLevel = 0;
@@ -434,6 +441,10 @@ int selectCard(uint8_t UID[10], int *uidLength){
   *uidLength = 0;
 
   int collisionPosition;
+
+  int cardIndexDecisionBit = 0;
+
+  *moreCardsAvailable = false;
   
   for(int cascadeLevel = 0; cascadeLevel < 3; cascadeLevel++) {
     SEL[0] = 0x93 + (cascadeLevel * 2);
@@ -441,11 +452,6 @@ int selectCard(uint8_t UID[10], int *uidLength){
 
     configureChecksum(CHECKSUM_RX_PARITY);
     int result = transceive(SEL, 2, 0, response, &responseCount, NULL, &collisionPosition);
-
-    if(collisionPosition != -1) {
-      Serial.printf("Collision position: %d\n", collisionPosition);
-      return -1;
-    }
   
     if(result == -1) {
       return -1;
@@ -453,29 +459,46 @@ int selectCard(uint8_t UID[10], int *uidLength){
 
     memcpy(SEL + 2, response, 5);
 
-    #if 1
-    uint8_t partialResponse[7];
-    int bits = 6;
-    SEL[1] = 0x20 | bits;
-    int lastReceivedByteBits;
-    setReceiveBitOffset(bits);
-    result = transceive(SEL, 3, bits, partialResponse, &responseCount, &lastReceivedByteBits, NULL);
-    setReceiveBitOffset(0);
+    while(collisionPosition != -1) {
+      Serial.println("collision");
+      bool collisionBitHigh = ((cardIndex >> cardIndexDecisionBit) == 1);
+      cardIndexDecisionBit++;
 
-    if(result == -1) {
-      return -1;
+      int fullByteCount = (collisionPosition / 8) + 2;
+      int partialBitCount = (collisionPosition % 8);
+
+      if(collisionBitHigh) {
+        SEL[fullByteCount] |= (1 << (partialBitCount));
+        response[fullByteCount - 2] |= (1 << (partialBitCount));
+      }else{
+        SEL[fullByteCount] &= ~(1 << (partialBitCount));
+        response[fullByteCount - 2] &= ~(1 << (partialBitCount));
+        *moreCardsAvailable = true;
+      }
+      SEL[fullByteCount] &= ~((~0) << (partialBitCount + 1));
+      response[fullByteCount - 2] &= ~((~0) << (partialBitCount + 1));
+
+      partialBitCount += 1;
+      SEL[1] = (fullByteCount << 4) | (partialBitCount);
+
+      uint8_t collisionResponse[5];
+      setReceiveBitOffset(partialBitCount);
+      int result = transceive(SEL, fullByteCount + 1, partialBitCount, collisionResponse, &responseCount, NULL, &collisionPosition);
+
+      SEL[fullByteCount] |= collisionResponse[0];
+      response[fullByteCount - 2] |= collisionResponse[0];
+      
+      memcpy(SEL + fullByteCount + 1, collisionResponse + 1, responseCount - 1);
+      memcpy(response + fullByteCount - 1, collisionResponse + 1, responseCount - 1);
     }
-
-    Serial.printf("response: %d, last bits: %d\n", result, lastReceivedByteBits);
-    printArray(partialResponse, responseCount, "partial response");
-    #endif
+    // clean up after possible collision
+    setReceiveBitOffset(0);
 
     SEL[1] = 0x70;
     uint8_t SAK;
 
     configureChecksum(CHECKSUM_TX_CRC | CHECKSUM_RX_CRC);
     result = transceive(SEL, 7, 0, &SAK, &responseCount, NULL, NULL);
-    Serial.printf("SAK: %02x\n", SAK);
 
     if(result == -1) {
       return -1;
@@ -554,28 +577,23 @@ void loop() {
 
   RFOn();
 
-  int result = transceiveATQ(&ATQA);
-
-  if(result < 0) {
-    Serial.println("ATQA error");
-    // RFOff();
-    // return;
-  }
-
-  Serial.printf("ATQA: %x\n", ATQA);
-
   uint8_t uid[10];
   int uidLength;
 
   // enableTXCRC();
 
-  result = selectCard(uid, &uidLength);
+  bool moreCardsAvailable = true;
+  for(int cardIndex = 0; moreCardsAvailable; cardIndex++) {
+    transceiveWUP(&ATQA);
 
-  if(result < 0) {
-    Serial.println("select error");
+    int result = selectCard(uid, &uidLength, 1 - cardIndex, &moreCardsAvailable);
+
+    if(result < 0) {
+      Serial.println("select error");
+    }
+
+    printArray(uid, uidLength, "UID");
   }
-
-  printArray(uid, uidLength, "UID");
 
   RFOff();
 }
