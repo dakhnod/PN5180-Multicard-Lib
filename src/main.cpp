@@ -419,6 +419,16 @@ int transceiveWUP(uint16_t *ATQA) {
   return transceiveShort(0x52, ATQA);
 }
 
+void transceiveHLTA(){
+  uint8_t response[7];
+  int responseLength;
+
+  configureChecksum(CHECKSUM_TX_CRC);
+  uint8_t payload[] = {0x50, 0x00};
+
+  transceive(payload, 2, 0, response, &responseLength, NULL, NULL);
+}
+
 void setReceiveBitOffset(int offset) {
   clearRegisterBits(0x12, 0b111 << 6);
   if(offset == 0) {
@@ -428,6 +438,11 @@ void setReceiveBitOffset(int offset) {
 }
 
 int selectCard(uint8_t UID[10], int *uidLength, int cardIndex, bool *moreCardsAvailable){
+  transceiveHLTA();
+
+  uint16_t ATQA;
+  transceiveWUP(&ATQA);
+
   uint8_t SEL[7];
 
   int cascadeLevel = 0;
@@ -584,9 +599,7 @@ void loop() {
 
   bool moreCardsAvailable = true;
   for(int cardIndex = 0; moreCardsAvailable; cardIndex++) {
-    transceiveWUP(&ATQA);
-
-    int result = selectCard(uid, &uidLength, 1 - cardIndex, &moreCardsAvailable);
+    int result = selectCard(uid, &uidLength, cardIndex, &moreCardsAvailable);
 
     if(result < 0) {
       Serial.println("select error");
